@@ -1,6 +1,8 @@
+// +build !confonly
+
 package dispatcher
 
-//go:generate errorgen
+//go:generate go run v2ray.com/core/common/errors/errorgen
 
 import (
 	"context"
@@ -9,15 +11,16 @@ import (
 	"time"
 
 	"v2ray.com/core"
-	"v2ray.com/core/app/proxyman"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/log"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/features/outbound"
 	"v2ray.com/core/features/policy"
 	"v2ray.com/core/features/routing"
+	routing_session "v2ray.com/core/features/routing/session"
 	"v2ray.com/core/features/stats"
 	"v2ray.com/core/transport"
 	"v2ray.com/core/transport/pipe"
@@ -77,13 +80,13 @@ func (r *cachedReader) ReadMultiBufferTimeout(timeout time.Duration) (buf.MultiB
 	return r.reader.ReadMultiBufferTimeout(timeout)
 }
 
-func (r *cachedReader) CloseError() {
+func (r *cachedReader) Interrupt() {
 	r.Lock()
 	if r.cache != nil {
 		r.cache = buf.ReleaseMulti(r.cache)
 	}
 	r.Unlock()
-	r.reader.CloseError()
+	r.reader.Interrupt()
 }
 
 // DefaultDispatcher is a default implementation of Dispatcher.
@@ -194,8 +197,13 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	ctx = session.ContextWithOutbound(ctx, ob)
 
 	inbound, outbound := d.getLink(ctx)
-	sniffingConfig := proxyman.SniffingConfigFromContext(ctx)
-	if destination.Network != net.Network_TCP || sniffingConfig == nil || !sniffingConfig.Enabled {
+	content := session.ContentFromContext(ctx)
+	if content == nil {
+		content = new(session.Content)
+		ctx = session.ContextWithContent(ctx, content)
+	}
+	sniffingRequest := content.SniffingRequest
+	if destination.Network != net.Network_TCP || !sniffingRequest.Enabled {
 		go d.routedDispatch(ctx, outbound, destination)
 	} else {
 		go func() {
@@ -205,9 +213,9 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 			outbound.Reader = cReader
 			result, err := sniffer(ctx, cReader)
 			if err == nil {
-				ctx = ContextWithSniffingResult(ctx, result)
+				content.Protocol = result.Protocol()
 			}
-			if err == nil && shouldOverride(result, sniffingConfig.DestinationOverride) {
+			if err == nil && shouldOverride(result, sniffingRequest.OverrideDestinationForProtocol) {
 				domain := result.Domain()
 				newError("sniffed domain: ", domain).WriteToLog(session.ExportIDToError(ctx))
 				destination.Address = net.ParseAddress(domain)
@@ -250,12 +258,19 @@ func sniffer(ctx context.Context, cReader *cachedReader) (SniffResult, error) {
 }
 
 func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
-	dispatcher := d.ohm.GetDefaultHandler()
-	if d.router != nil {
-		if tag, err := d.router.PickRoute(ctx); err == nil {
-			if handler := d.ohm.GetHandler(tag); handler != nil {
+	var handler outbound.Handler
+
+	skipRoutePick := false
+	if content := session.ContentFromContext(ctx); content != nil {
+		skipRoutePick = content.SkipRoutePick
+	}
+
+	if d.router != nil && !skipRoutePick {
+		if route, err := d.router.PickRoute(routing_session.AsRoutingContext(ctx)); err == nil {
+			tag := route.GetOutboundTag()
+			if h := d.ohm.GetHandler(tag); h != nil {
 				newError("taking detour [", tag, "] for [", destination, "]").WriteToLog(session.ExportIDToError(ctx))
-				dispatcher = handler
+				handler = h
 			} else {
 				newError("non existing tag: ", tag).AtWarning().WriteToLog(session.ExportIDToError(ctx))
 			}
@@ -263,5 +278,24 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 			newError("default route for ", destination).WriteToLog(session.ExportIDToError(ctx))
 		}
 	}
-	dispatcher.Dispatch(ctx, link)
+
+	if handler == nil {
+		handler = d.ohm.GetDefaultHandler()
+	}
+
+	if handler == nil {
+		newError("default outbound handler not exist").WriteToLog(session.ExportIDToError(ctx))
+		common.Close(link.Writer)
+		common.Interrupt(link.Reader)
+		return
+	}
+
+	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
+		if tag := handler.Tag(); tag != "" {
+			accessMessage.Detour = tag
+		}
+		log.Record(accessMessage)
+	}
+
+	handler.Dispatch(ctx, link)
 }

@@ -1,9 +1,11 @@
+// +build !confonly
+
 package router
 
 import (
-	"context"
-
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/features/outbound"
+	"v2ray.com/core/features/routing"
 )
 
 // CIDRList is an alias of []*CIDR to provide sort.Interface.
@@ -58,7 +60,8 @@ func (r *Rule) GetTag() (string, error) {
 	return r.Tag, nil
 }
 
-func (r *Rule) Apply(ctx context.Context) bool {
+// Apply checks rule matching of current routing context.
+func (r *Rule) Apply(ctx routing.Context) bool {
 	return r.Condition.Apply(ctx)
 }
 
@@ -81,8 +84,14 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 		conds.Add(NewInboundTagMatcher(rr.InboundTag))
 	}
 
-	if rr.PortRange != nil {
-		conds.Add(NewPortMatcher(*rr.PortRange))
+	if rr.PortList != nil {
+		conds.Add(NewPortMatcher(rr.PortList, false))
+	} else if rr.PortRange != nil {
+		conds.Add(NewPortMatcher(&net.PortList{Range: []*net.PortRange{rr.PortRange}}, false))
+	}
+
+	if rr.SourcePortList != nil {
+		conds.Add(NewPortMatcher(rr.SourcePortList, true))
 	}
 
 	if len(rr.Networks) > 0 {
@@ -121,6 +130,14 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 
 	if len(rr.Protocol) > 0 {
 		conds.Add(NewProtocolMatcher(rr.Protocol))
+	}
+
+	if len(rr.Attributes) > 0 {
+		cond, err := NewAttributeMatcher(rr.Attributes)
+		if err != nil {
+			return nil, err
+		}
+		conds.Add(cond)
 	}
 
 	if conds.Len() == 0 {

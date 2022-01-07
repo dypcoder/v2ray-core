@@ -1,41 +1,54 @@
-jobs:
-- template: azure-pipelines.template.yml
-  parameters:
-    name: linux
-    vmImage: 'ubuntu-16.04'
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+      - dev*
+      - refs/tags/*
 
-- template: azure-pipelines.template.yml
-  parameters:
-    name: windows
-    vmImage: 'vs2017-win2016'
+pool:
+  vmImage: "ubuntu-latest"
 
-- template: azure-pipelines.template.yml
-  parameters:
-    name: macos
-    vmImage: 'macOS-10.13'
+variables:
+  - group: GithubToken
 
-- job: linux_coverage
-  dependsOn: linux
-  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-  timeoutInMinutes: 30
-
-  pool:
-    vmImage: 'Ubuntu 16.04'
-
-  variables:
-    GOPATH: '$(system.defaultWorkingDirectory)'
-    CODECOV_TOKEN: '$(coverage.token)'
-
-  steps:
-  - checkout: none
+steps:
+  - checkout: self
+  - task: GoTool@0
+    inputs:
+      version: "1.15.2"
   - script: |
       go version
-      go get -v -t -d v2ray.com/core/...
-      go get -v -t -d v2ray.com/ext/...
-    workingDirectory: '$(system.defaultWorkingDirectory)'
-    displayName: 'Fetch sources'
+      go mod download
+    workingDirectory: $(system.defaultWorkingDirectory)
+    displayName: "Fetch sources"
   - script: |
-      cd ./src/v2ray.com/core
-      bash ./testing/coverage/coverall
-    workingDirectory: '$(system.defaultWorkingDirectory)'
-    displayName: 'Coverage'
+      bazel build --action_env=PATH=$PATH --action_env=GOPATH=$(go env GOPATH) --action_env=GOCACHE=$(go env GOCACHE) --action_env=SPWD=$(pwd) --spawn_strategy local //release:all
+    workingDirectory: $(system.defaultWorkingDirectory)
+    displayName: "Build Binaries"
+  - script: |
+      echo $RELEASE_TAG
+      ./release/bleedingrelease.sh
+    workingDirectory: $(system.defaultWorkingDirectory)
+    displayName: "Generate Bleeding Edge Release"
+    env:
+      WORKDIR: $(system.defaultWorkingDirectory)
+      GITHUB_TOKEN: $(GITHUB_TOKEN)
+      PRERELEASE: true
+      RELEASE_TAG: unstable-$(Build.SourceVersion)
+      RELEASE_SHA: $(Build.SourceVersion)
+      TRIGGER_REASON: $(Build.SourceBranch)
+      GITHUB_REPO_OWNER: v2fly
+      GITHUB_REPO_NAME: v2ray-core
+  - script: |
+      echo $RELEASE_TAG
+      ./release/tagrelease.sh
+    workingDirectory: $(system.defaultWorkingDirectory)
+    displayName: "Generate Tag Release"
+    env:
+      WORKDIR: $(system.defaultWorkingDirectory)
+      GITHUB_TOKEN: $(GITHUB_TOKEN)
+      PRERELEASE: true
+      RELEASE_TAG: unstable-$(Build.SourceVersion)
+      RELEASE_SHA: $(Build.SourceVersion)
+      TRIGGER_REASON: $(Build.SourceBranch)

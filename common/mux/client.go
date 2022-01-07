@@ -21,7 +21,8 @@ import (
 )
 
 type ClientManager struct {
-	Picker WorkerPicker
+	Enabled bool // wheather mux is enabled from user config
+	Picker  WorkerPicker
 }
 
 func (m *ClientManager) Dispatch(ctx context.Context, link *transport.Link) error {
@@ -82,7 +83,7 @@ func (p *IncrementalWorkerPicker) findAvailable() int {
 	return -1
 }
 
-func (p *IncrementalWorkerPicker) pickInternal() (*ClientWorker, error, bool) {
+func (p *IncrementalWorkerPicker) pickInternal() (*ClientWorker, bool, error) {
 	p.access.Lock()
 	defer p.access.Unlock()
 
@@ -92,14 +93,14 @@ func (p *IncrementalWorkerPicker) pickInternal() (*ClientWorker, error, bool) {
 		if n > 1 && idx != n-1 {
 			p.workers[n-1], p.workers[idx] = p.workers[idx], p.workers[n-1]
 		}
-		return p.workers[idx], nil, false
+		return p.workers[idx], false, nil
 	}
 
 	p.cleanup()
 
 	worker, err := p.Factory.Create()
 	if err != nil {
-		return nil, err, false
+		return nil, false, err
 	}
 	p.workers = append(p.workers, worker)
 
@@ -110,11 +111,11 @@ func (p *IncrementalWorkerPicker) pickInternal() (*ClientWorker, error, bool) {
 		}
 	}
 
-	return worker, nil, true
+	return worker, true, nil
 }
 
 func (p *IncrementalWorkerPicker) PickAvailable() (*ClientWorker, error) {
-	worker, err, start := p.pickInternal()
+	worker, start, err := p.pickInternal()
 	if start {
 		common.Must(p.cleanupTask.Start())
 	}
@@ -213,8 +214,8 @@ func (m *ClientWorker) monitor() {
 		select {
 		case <-m.done.Wait():
 			m.sessionManager.Close()
-			common.Close(m.link.Writer)    // nolint: errcheck
-			pipe.CloseError(m.link.Reader) // nolint: errcheck
+			common.Close(m.link.Writer)     // nolint: errcheck
+			common.Interrupt(m.link.Reader) // nolint: errcheck
 			return
 		case <-timer.C:
 			size := m.sessionManager.Size()
@@ -253,14 +254,14 @@ func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
 	if err := writeFirstPayload(s.input, writer); err != nil {
 		newError("failed to write first payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
 		writer.hasError = true
-		pipe.CloseError(s.input)
+		common.Interrupt(s.input)
 		return
 	}
 
 	if err := buf.Copy(s.input, writer); err != nil {
 		newError("failed to fetch all input").Base(err).WriteToLog(session.ExportIDToError(ctx))
 		writer.hasError = true
-		pipe.CloseError(s.input)
+		common.Interrupt(s.input)
 		return
 	}
 }
@@ -339,7 +340,7 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 		closingWriter.Close()
 
 		drainErr := buf.Copy(rr, buf.Discard)
-		pipe.CloseError(s.input)
+		common.Interrupt(s.input)
 		s.Close()
 		return drainErr
 	}
@@ -350,8 +351,8 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 func (m *ClientWorker) handleStatusEnd(meta *FrameMetadata, reader *buf.BufferedReader) error {
 	if s, found := m.sessionManager.Get(meta.SessionID); found {
 		if meta.Option.Has(OptionError) {
-			pipe.CloseError(s.input)
-			pipe.CloseError(s.output)
+			common.Interrupt(s.input)
+			common.Interrupt(s.output)
 		}
 		s.Close()
 	}

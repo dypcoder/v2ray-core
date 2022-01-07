@@ -1,6 +1,8 @@
+// +build !confonly
+
 package reverse
 
-//go:generate errorgen
+//go:generate go run v2ray.com/core/common/errors/errorgen
 
 import (
 	"context"

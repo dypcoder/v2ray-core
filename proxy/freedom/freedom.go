@@ -1,6 +1,8 @@
+// +build !confonly
+
 package freedom
 
-//go:generate errorgen
+//go:generate go run v2ray.com/core/common/errors/errorgen
 
 import (
 	"context"
@@ -37,12 +39,12 @@ func init() {
 type Handler struct {
 	policyManager policy.Manager
 	dns           dns.Client
-	config        Config
+	config        *Config
 }
 
 // Init initializes the Handler with necessary parameters.
 func (h *Handler) Init(config *Config, pm policy.Manager, d dns.Client) error {
-	h.config = *config
+	h.config = config
 	h.policyManager = pm
 	h.dns = d
 
@@ -150,6 +152,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		} else {
 			writer = &buf.SequentialWriter{Writer: conn}
 		}
+
 		if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to process request").Base(err)
 		}
@@ -164,7 +167,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		if destination.Network == net.Network_TCP {
 			reader = buf.NewReader(conn)
 		} else {
-			reader = &buf.PacketReader{Reader: conn}
+			reader = buf.NewPacketReader(conn)
 		}
 		if err := buf.Copy(reader, output, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to process response").Base(err)

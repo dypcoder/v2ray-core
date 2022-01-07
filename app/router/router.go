@@ -1,29 +1,19 @@
+// +build !confonly
+
 package router
 
-//go:generate errorgen
+//go:generate go run v2ray.com/core/common/errors/errorgen
 
 import (
 	"context"
 
 	"v2ray.com/core"
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/session"
 	"v2ray.com/core/features/dns"
 	"v2ray.com/core/features/outbound"
 	"v2ray.com/core/features/routing"
+	routing_dns "v2ray.com/core/features/routing/dns"
 )
-
-func init() {
-	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
-		r := new(Router)
-		if err := core.RequireFeatures(ctx, func(d dns.Client, ohm outbound.Manager) error {
-			return r.Init(config.(*Config), d, ohm)
-		}); err != nil {
-			return nil, err
-		}
-		return r, nil
-	}))
-}
 
 // Router is an implementation of routing.Router.
 type Router struct {
@@ -31,6 +21,13 @@ type Router struct {
 	rules          []*Rule
 	balancers      map[string]*Balancer
 	dns            dns.Client
+}
+
+// Route is an implementation of routing.Route.
+type Route struct {
+	routing.Context
+	outboundGroupTags []string
+	outboundTag       string
 }
 
 // Init initializes the Router.
@@ -71,61 +68,44 @@ func (r *Router) Init(config *Config, d dns.Client, ohm outbound.Manager) error 
 	return nil
 }
 
-func (r *Router) PickRoute(ctx context.Context) (string, error) {
-	rule, err := r.pickRouteInternal(ctx)
-	if err != nil {
-		return "", err
-	}
-	return rule.GetTag()
-}
-
-func isDomainOutbound(outbound *session.Outbound) bool {
-	return outbound != nil && outbound.Target.IsValid() && outbound.Target.Address.Family().IsDomain()
-}
-
-func (r *Router) resolveIP(outbound *session.Outbound) error {
-	domain := outbound.Target.Address.Domain()
-	ips, err := r.dns.LookupIP(domain)
-	if err != nil {
-		return err
-	}
-
-	outbound.ResolvedIPs = ips
-	return nil
-}
-
 // PickRoute implements routing.Router.
-func (r *Router) pickRouteInternal(ctx context.Context) (*Rule, error) {
-	outbound := session.OutboundFromContext(ctx)
-	if r.domainStrategy == Config_IpOnDemand && isDomainOutbound(outbound) {
-		if err := r.resolveIP(outbound); err != nil {
-			newError("failed to resolve IP for domain").Base(err).WriteToLog(session.ExportIDToError(ctx))
-		}
+func (r *Router) PickRoute(ctx routing.Context) (routing.Route, error) {
+	rule, ctx, err := r.pickRouteInternal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tag, err := rule.GetTag()
+	if err != nil {
+		return nil, err
+	}
+	return &Route{Context: ctx, outboundTag: tag}, nil
+}
+
+func (r *Router) pickRouteInternal(ctx routing.Context) (*Rule, routing.Context, error) {
+	if r.domainStrategy == Config_IpOnDemand {
+		ctx = routing_dns.ContextWithDNSClient(ctx, r.dns)
 	}
 
 	for _, rule := range r.rules {
 		if rule.Apply(ctx) {
-			return rule, nil
+			return rule, ctx, nil
 		}
 	}
 
-	if r.domainStrategy != Config_IpIfNonMatch || !isDomainOutbound(outbound) {
-		return nil, common.ErrNoClue
+	if r.domainStrategy != Config_IpIfNonMatch || len(ctx.GetTargetDomain()) == 0 {
+		return nil, ctx, common.ErrNoClue
 	}
 
-	if err := r.resolveIP(outbound); err != nil {
-		newError("failed to resolve IP for domain").Base(err).WriteToLog(session.ExportIDToError(ctx))
-		return nil, common.ErrNoClue
-	}
+	ctx = routing_dns.ContextWithDNSClient(ctx, r.dns)
 
 	// Try applying rules again if we have IPs.
 	for _, rule := range r.rules {
 		if rule.Apply(ctx) {
-			return rule, nil
+			return rule, ctx, nil
 		}
 	}
 
-	return nil, common.ErrNoClue
+	return nil, ctx, common.ErrNoClue
 }
 
 // Start implements common.Runnable.
@@ -141,4 +121,26 @@ func (*Router) Close() error {
 // Type implement common.HasType.
 func (*Router) Type() interface{} {
 	return routing.RouterType()
+}
+
+// GetOutboundGroupTags implements routing.Route.
+func (r *Route) GetOutboundGroupTags() []string {
+	return r.outboundGroupTags
+}
+
+// GetOutboundTag implements routing.Route.
+func (r *Route) GetOutboundTag() string {
+	return r.outboundTag
+}
+
+func init() {
+	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+		r := new(Router)
+		if err := core.RequireFeatures(ctx, func(d dns.Client, ohm outbound.Manager) error {
+			return r.Init(config.(*Config), d, ohm)
+		}); err != nil {
+			return nil, err
+		}
+		return r, nil
+	}))
 }

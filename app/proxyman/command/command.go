@@ -1,3 +1,5 @@
+// +build !confonly
+
 package command
 
 import (
@@ -122,6 +124,8 @@ func (s *handlerServer) AlterOutbound(ctx context.Context, request *AlterOutboun
 	handler := s.ohm.GetHandler(request.Tag)
 	return &AlterOutboundResponse{}, operation.ApplyOutbound(ctx, handler)
 }
+
+func (s *handlerServer) mustEmbedUnimplementedHandlerServiceServer() {}
 
 type service struct {
 	v *core.Instance

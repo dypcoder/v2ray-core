@@ -1,8 +1,9 @@
+// +build !confonly
+
 package kcp
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
 	"sync/atomic"
 
@@ -11,7 +12,8 @@ import (
 	"v2ray.com/core/common/dice"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
-	v2tls "v2ray.com/core/transport/internet/tls"
+	"v2ray.com/core/transport/internet/tls"
+	"v2ray.com/core/transport/internet/xtls"
 )
 
 var (
@@ -45,6 +47,7 @@ func fetchInput(ctx context.Context, input io.Reader, reader PacketReader, conn 
 	}
 }
 
+// DialKCP dials a new KCP connections to the specific destination.
 func DialKCP(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (internet.Connection, error) {
 	dest.Network = net.Network_UDP
 	newError("dialing mKCP to ", dest).WriteToLog()
@@ -85,9 +88,10 @@ func DialKCP(ctx context.Context, dest net.Destination, streamSettings *internet
 
 	var iConn internet.Connection = session
 
-	if config := v2tls.ConfigFromStreamSettings(streamSettings); config != nil {
-		tlsConn := tls.Client(iConn, config.GetTLSConfig(v2tls.WithDestination(dest)))
-		iConn = tlsConn
+	if config := tls.ConfigFromStreamSettings(streamSettings); config != nil {
+		iConn = tls.Client(iConn, config.GetTLSConfig(tls.WithDestination(dest)))
+	} else if config := xtls.ConfigFromStreamSettings(streamSettings); config != nil {
+		iConn = xtls.Client(iConn, config.GetXTLSConfig(xtls.WithDestination(dest)))
 	}
 
 	return iConn, nil

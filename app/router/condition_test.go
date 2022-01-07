@@ -1,7 +1,6 @@
 package router_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,30 +8,50 @@ import (
 
 	proto "github.com/golang/protobuf/proto"
 
-	"v2ray.com/core/app/dispatcher"
 	. "v2ray.com/core/app/router"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/platform"
+	"v2ray.com/core/common/platform/filesystem"
 	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/protocol/http"
 	"v2ray.com/core/common/session"
-	. "v2ray.com/ext/assert"
-	"v2ray.com/ext/sysio"
+	"v2ray.com/core/features/routing"
+	routing_session "v2ray.com/core/features/routing/session"
 )
 
-func withOutbound(outbound *session.Outbound) context.Context {
-	return session.ContextWithOutbound(context.Background(), outbound)
+func init() {
+	wd, err := os.Getwd()
+	common.Must(err)
+
+	if _, err := os.Stat(platform.GetAssetLocation("geoip.dat")); err != nil && os.IsNotExist(err) {
+		common.Must(filesystem.CopyFile(platform.GetAssetLocation("geoip.dat"), filepath.Join(wd, "..", "..", "release", "config", "geoip.dat")))
+	}
+	if _, err := os.Stat(platform.GetAssetLocation("geosite.dat")); err != nil && os.IsNotExist(err) {
+		common.Must(filesystem.CopyFile(platform.GetAssetLocation("geosite.dat"), filepath.Join(wd, "..", "..", "release", "config", "geosite.dat")))
+	}
 }
 
-func withInbound(inbound *session.Inbound) context.Context {
-	return session.ContextWithInbound(context.Background(), inbound)
+func withBackground() routing.Context {
+	return &routing_session.Context{}
+}
+
+func withOutbound(outbound *session.Outbound) routing.Context {
+	return &routing_session.Context{Outbound: outbound}
+}
+
+func withInbound(inbound *session.Inbound) routing.Context {
+	return &routing_session.Context{Inbound: inbound}
+}
+
+func withContent(content *session.Content) routing.Context {
+	return &routing_session.Context{Content: content}
 }
 
 func TestRoutingRule(t *testing.T) {
 	type ruleTest struct {
-		input  context.Context
+		input  routing.Context
 		output bool
 	}
 
@@ -83,7 +102,7 @@ func TestRoutingRule(t *testing.T) {
 					output: false,
 				},
 				{
-					input:  context.Background(),
+					input:  withBackground(),
 					output: false,
 				},
 			},
@@ -119,7 +138,7 @@ func TestRoutingRule(t *testing.T) {
 					output: true,
 				},
 				{
-					input:  context.Background(),
+					input:  withBackground(),
 					output: false,
 				},
 			},
@@ -159,7 +178,7 @@ func TestRoutingRule(t *testing.T) {
 					output: true,
 				},
 				{
-					input:  context.Background(),
+					input:  withBackground(),
 					output: false,
 				},
 			},
@@ -200,7 +219,7 @@ func TestRoutingRule(t *testing.T) {
 					output: false,
 				},
 				{
-					input:  context.Background(),
+					input:  withBackground(),
 					output: false,
 				},
 			},
@@ -211,7 +230,7 @@ func TestRoutingRule(t *testing.T) {
 			},
 			test: []ruleTest{
 				{
-					input:  dispatcher.ContextWithSniffingResult(context.Background(), &http.SniffHeader{}),
+					input:  withContent(&session.Content{Protocol: (&http.SniffHeader{}).Protocol()}),
 					output: true,
 				},
 			},
@@ -231,6 +250,74 @@ func TestRoutingRule(t *testing.T) {
 				},
 			},
 		},
+		{
+			rule: &RoutingRule{
+				PortList: &net.PortList{
+					Range: []*net.PortRange{
+						{From: 443, To: 443},
+						{From: 1000, To: 1100},
+					},
+				},
+			},
+			test: []ruleTest{
+				{
+					input:  withOutbound(&session.Outbound{Target: net.TCPDestination(net.LocalHostIP, 443)}),
+					output: true,
+				},
+				{
+					input:  withOutbound(&session.Outbound{Target: net.TCPDestination(net.LocalHostIP, 1100)}),
+					output: true,
+				},
+				{
+					input:  withOutbound(&session.Outbound{Target: net.TCPDestination(net.LocalHostIP, 1005)}),
+					output: true,
+				},
+				{
+					input:  withOutbound(&session.Outbound{Target: net.TCPDestination(net.LocalHostIP, 53)}),
+					output: false,
+				},
+			},
+		},
+		{
+			rule: &RoutingRule{
+				SourcePortList: &net.PortList{
+					Range: []*net.PortRange{
+						{From: 123, To: 123},
+						{From: 9993, To: 9999},
+					},
+				},
+			},
+			test: []ruleTest{
+				{
+					input:  withInbound(&session.Inbound{Source: net.UDPDestination(net.LocalHostIP, 123)}),
+					output: true,
+				},
+				{
+					input:  withInbound(&session.Inbound{Source: net.UDPDestination(net.LocalHostIP, 9999)}),
+					output: true,
+				},
+				{
+					input:  withInbound(&session.Inbound{Source: net.UDPDestination(net.LocalHostIP, 9994)}),
+					output: true,
+				},
+				{
+					input:  withInbound(&session.Inbound{Source: net.UDPDestination(net.LocalHostIP, 53)}),
+					output: false,
+				},
+			},
+		},
+		{
+			rule: &RoutingRule{
+				Protocol:   []string{"http"},
+				Attributes: "attrs[':path'].startswith('/test')",
+			},
+			test: []ruleTest{
+				{
+					input:  withContent(&session.Content{Protocol: "http/1.1", Attributes: map[string]string{":path": "/test/1"}}),
+					output: true,
+				},
+			},
+		},
 	}
 
 	for _, test := range cases {
@@ -247,7 +334,7 @@ func TestRoutingRule(t *testing.T) {
 }
 
 func loadGeoSite(country string) ([]*Domain, error) {
-	geositeBytes, err := sysio.ReadAsset("geosite.dat")
+	geositeBytes, err := filesystem.ReadAsset("geosite.dat")
 	if err != nil {
 		return nil, err
 	}
@@ -266,29 +353,48 @@ func loadGeoSite(country string) ([]*Domain, error) {
 }
 
 func TestChinaSites(t *testing.T) {
-	assert := With(t)
-
-	common.Must(sysio.CopyFile(platform.GetAssetLocation("geosite.dat"), filepath.Join(os.Getenv("GOPATH"), "src", "v2ray.com", "core", "release", "config", "geosite.dat")))
-
 	domains, err := loadGeoSite("CN")
-	assert(err, IsNil)
+	common.Must(err)
 
 	matcher, err := NewDomainMatcher(domains)
 	common.Must(err)
 
-	assert(matcher.ApplyDomain("163.com"), IsTrue)
-	assert(matcher.ApplyDomain("163.com"), IsTrue)
-	assert(matcher.ApplyDomain("164.com"), IsFalse)
-	assert(matcher.ApplyDomain("164.com"), IsFalse)
+	type TestCase struct {
+		Domain string
+		Output bool
+	}
+	testCases := []TestCase{
+		{
+			Domain: "163.com",
+			Output: true,
+		},
+		{
+			Domain: "163.com",
+			Output: true,
+		},
+		{
+			Domain: "164.com",
+			Output: false,
+		},
+		{
+			Domain: "164.com",
+			Output: false,
+		},
+	}
 
 	for i := 0; i < 1024; i++ {
-		assert(matcher.ApplyDomain(strconv.Itoa(i)+".not-exists.com"), IsFalse)
+		testCases = append(testCases, TestCase{Domain: strconv.Itoa(i) + ".not-exists.com", Output: false})
+	}
+
+	for _, testCase := range testCases {
+		r := matcher.ApplyDomain(testCase.Domain)
+		if r != testCase.Output {
+			t.Error("expected output ", testCase.Output, " for domain ", testCase.Domain, " but got ", r)
+		}
 	}
 }
 
 func BenchmarkMultiGeoIPMatcher(b *testing.B) {
-	common.Must(sysio.CopyFile(platform.GetAssetLocation("geoip.dat"), filepath.Join(os.Getenv("GOPATH"), "src", "v2ray.com", "core", "release", "config", "geoip.dat")))
-
 	var geoips []*GeoIP
 
 	{

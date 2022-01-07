@@ -51,6 +51,44 @@ type Outbound struct {
 	Target net.Destination
 	// Gateway address
 	Gateway net.Address
-	// ResolvedIPs is the resolved IP addresses, if the Targe is a domain address.
-	ResolvedIPs []net.IP
+}
+
+// SniffingRequest controls the behavior of content sniffing.
+type SniffingRequest struct {
+	OverrideDestinationForProtocol []string
+	Enabled                        bool
+}
+
+// Content is the metadata of the connection content.
+type Content struct {
+	// Protocol of current content.
+	Protocol string
+
+	SniffingRequest SniffingRequest
+
+	Attributes map[string]string
+
+	SkipRoutePick bool
+}
+
+// Sockopt is the settings for socket connection.
+type Sockopt struct {
+	// Mark of the socket connection.
+	Mark int32
+}
+
+// SetAttribute attachs additional string attributes to content.
+func (c *Content) SetAttribute(name string, value string) {
+	if c.Attributes == nil {
+		c.Attributes = make(map[string]string)
+	}
+	c.Attributes[name] = value
+}
+
+// Attribute retrieves additional string attributes from content.
+func (c *Content) Attribute(name string) string {
+	if c.Attributes == nil {
+		return ""
+	}
+	return c.Attributes[name]
 }

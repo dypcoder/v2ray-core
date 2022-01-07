@@ -1,3 +1,5 @@
+// +build !confonly
+
 package websocket
 
 import (
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pires/go-proxyproto"
 
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
@@ -25,7 +28,10 @@ type requestHandler struct {
 var upgrader = &websocket.Upgrader{
 	ReadBufferSize:   4 * 1024,
 	WriteBufferSize:  4 * 1024,
-	HandshakeTimeout: time.Second * 8,
+	HandshakeTimeout: time.Second * 4,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -50,22 +56,34 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 type Listener struct {
 	sync.Mutex
+	server   http.Server
 	listener net.Listener
 	config   *Config
 	addConn  internet.ConnHandler
 }
 
 func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSettings *internet.MemoryStreamConfig, addConn internet.ConnHandler) (internet.Listener, error) {
+	listener, err := internet.ListenSystem(ctx, &net.TCPAddr{
+		IP:   address.IP(),
+		Port: int(port),
+	}, streamSettings.SocketSettings)
+	if err != nil {
+		return nil, newError("failed to listen TCP(for WS) on", address, ":", port).Base(err)
+	}
+	newError("listening TCP(for WS) on ", address, ":", port).WriteToLog(session.ExportIDToError(ctx))
+
 	wsSettings := streamSettings.ProtocolSettings.(*Config)
 
-	var tlsConfig *tls.Config
-	if config := v2tls.ConfigFromStreamSettings(streamSettings); config != nil {
-		tlsConfig = config.GetTLSConfig()
+	if wsSettings.AcceptProxyProtocol {
+		policyFunc := func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }
+		listener = &proxyproto.Listener{Listener: listener, Policy: policyFunc}
+		newError("accepting PROXY protocol").AtWarning().WriteToLog(session.ExportIDToError(ctx))
 	}
 
-	listener, err := listenTCP(ctx, address, port, tlsConfig, streamSettings.SocketSettings)
-	if err != nil {
-		return nil, err
+	if config := v2tls.ConfigFromStreamSettings(streamSettings); config != nil {
+		if tlsConfig := config.GetTLSConfig(); tlsConfig != nil {
+			listener = tls.NewListener(listener, tlsConfig)
+		}
 	}
 
 	l := &Listener{
@@ -74,36 +92,22 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 		listener: listener,
 	}
 
+	l.server = http.Server{
+		Handler: &requestHandler{
+			path: wsSettings.GetNormalizedPath(),
+			ln:   l,
+		},
+		ReadHeaderTimeout: time.Second * 4,
+		MaxHeaderBytes:    2048,
+	}
+
 	go func() {
-		if err := l.serve(); err != nil {
+		if err := l.server.Serve(l.listener); err != nil {
 			newError("failed to serve http for WebSocket").Base(err).AtWarning().WriteToLog(session.ExportIDToError(ctx))
 		}
 	}()
 
 	return l, err
-}
-
-func listenTCP(ctx context.Context, address net.Address, port net.Port, tlsConfig *tls.Config, sockopt *internet.SocketConfig) (net.Listener, error) {
-	listener, err := internet.ListenSystem(ctx, &net.TCPAddr{
-		IP:   address.IP(),
-		Port: int(port),
-	}, sockopt)
-	if err != nil {
-		return nil, newError("failed to listen TCP on", address, ":", port).Base(err)
-	}
-
-	if tlsConfig != nil {
-		return tls.NewListener(listener, tlsConfig), nil
-	}
-
-	return listener, nil
-}
-
-func (ln *Listener) serve() error {
-	return http.Serve(ln.listener, &requestHandler{
-		path: ln.config.GetNormalizedPath(),
-		ln:   ln,
-	})
 }
 
 // Addr implements net.Listener.Addr().

@@ -33,7 +33,7 @@ func PortFromString(s string) (Port, error) {
 	return PortFromInt(uint32(val))
 }
 
-// Value return the correspoding uint16 value of a Port.
+// Value return the corresponding uint16 value of a Port.
 func (p Port) Value() uint16 {
 	return uint16(p)
 }
@@ -44,17 +44,17 @@ func (p Port) String() string {
 }
 
 // FromPort returns the beginning port of this PortRange.
-func (p PortRange) FromPort() Port {
+func (p *PortRange) FromPort() Port {
 	return Port(p.From)
 }
 
 // ToPort returns the end port of this PortRange.
-func (p PortRange) ToPort() Port {
+func (p *PortRange) ToPort() Port {
 	return Port(p.To)
 }
 
 // Contains returns true if the given port is within the range of a PortRange.
-func (p PortRange) Contains(port Port) bool {
+func (p *PortRange) Contains(port Port) bool {
 	return p.FromPort() <= port && port <= p.ToPort()
 }
 
@@ -64,4 +64,32 @@ func SinglePortRange(p Port) *PortRange {
 		From: uint32(p),
 		To:   uint32(p),
 	}
+}
+
+type MemoryPortRange struct {
+	From Port
+	To   Port
+}
+
+func (r MemoryPortRange) Contains(port Port) bool {
+	return r.From <= port && port <= r.To
+}
+
+type MemoryPortList []MemoryPortRange
+
+func PortListFromProto(l *PortList) MemoryPortList {
+	mpl := make(MemoryPortList, 0, len(l.Range))
+	for _, r := range l.Range {
+		mpl = append(mpl, MemoryPortRange{From: Port(r.From), To: Port(r.To)})
+	}
+	return mpl
+}
+
+func (mpl MemoryPortList) Contains(port Port) bool {
+	for _, pr := range mpl {
+		if pr.Contains(port) {
+			return true
+		}
+	}
+	return false
 }

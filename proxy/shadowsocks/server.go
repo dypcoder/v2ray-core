@@ -1,3 +1,5 @@
+// +build !confonly
+
 package shadowsocks
 
 import (
@@ -10,6 +12,7 @@ import (
 	"v2ray.com/core/common/log"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
+	udp_proto "v2ray.com/core/common/protocol/udp"
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal"
 	"v2ray.com/core/common/task"
@@ -17,11 +20,10 @@ import (
 	"v2ray.com/core/features/routing"
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/udp"
-	"v2ray.com/core/transport/pipe"
 )
 
 type Server struct {
-	config        ServerConfig
+	config        *ServerConfig
 	user          *protocol.MemoryUser
 	policyManager policy.Manager
 }
@@ -39,7 +41,7 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 
 	v := core.MustFromContext(ctx)
 	s := &Server{
-		config:        *config,
+		config:        config,
 		user:          mUser,
 		policyManager: v.GetFeature(policy.ManagerType()).(policy.Manager),
 	}
@@ -70,12 +72,13 @@ func (s *Server) Process(ctx context.Context, network net.Network, conn internet
 }
 
 func (s *Server) handlerUDPPayload(ctx context.Context, conn internet.Connection, dispatcher routing.Dispatcher) error {
-	udpServer := udp.NewDispatcher(dispatcher, func(ctx context.Context, payload *buf.Buffer) {
+	udpServer := udp.NewDispatcher(dispatcher, func(ctx context.Context, packet *udp_proto.Packet) {
 		request := protocol.RequestHeaderFromContext(ctx)
 		if request == nil {
 			return
 		}
 
+		payload := packet.Payload
 		data, err := EncodeUDPPacket(request, payload.Bytes())
 		payload.Release()
 		if err != nil {
@@ -87,14 +90,13 @@ func (s *Server) handlerUDPPayload(ctx context.Context, conn internet.Connection
 		conn.Write(data.Bytes())
 	})
 
-	account := s.user.Account.(*MemoryAccount)
 	inbound := session.InboundFromContext(ctx)
 	if inbound == nil {
 		panic("no inbound metadata")
 	}
 	inbound.User = s.user
 
-	reader := buf.NewReader(conn)
+	reader := buf.NewPacketReader(conn)
 	for {
 		mpayload, err := reader.ReadMultiBuffer()
 		if err != nil {
@@ -117,31 +119,21 @@ func (s *Server) handlerUDPPayload(ctx context.Context, conn internet.Connection
 				continue
 			}
 
-			if request.Option.Has(RequestOptionOneTimeAuth) && account.OneTimeAuth == Account_Disabled {
-				newError("client payload enables OTA but server doesn't allow it").WriteToLog(session.ExportIDToError(ctx))
-				payload.Release()
-				continue
-			}
-
-			if !request.Option.Has(RequestOptionOneTimeAuth) && account.OneTimeAuth == Account_Enabled {
-				newError("client payload disables OTA but server forces it").WriteToLog(session.ExportIDToError(ctx))
-				payload.Release()
-				continue
-			}
-
+			currentPacketCtx := ctx
 			dest := request.Destination()
 			if inbound.Source.IsValid() {
-				log.Record(&log.AccessMessage{
+				currentPacketCtx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
 					From:   inbound.Source,
 					To:     dest,
 					Status: log.AccessAccepted,
 					Reason: "",
+					Email:  request.User.Email,
 				})
 			}
-			newError("tunnelling request to ", dest).WriteToLog(session.ExportIDToError(ctx))
+			newError("tunnelling request to ", dest).WriteToLog(session.ExportIDToError(currentPacketCtx))
 
-			ctx = protocol.ContextWithRequestHeader(ctx, request)
-			udpServer.Dispatch(ctx, dest, data)
+			currentPacketCtx = protocol.ContextWithRequestHeader(currentPacketCtx, request)
+			udpServer.Dispatch(currentPacketCtx, dest, data)
 		}
 	}
 
@@ -172,11 +164,12 @@ func (s *Server) handleConnection(ctx context.Context, conn internet.Connection,
 	inbound.User = s.user
 
 	dest := request.Destination()
-	log.Record(&log.AccessMessage{
+	ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
 		From:   conn.RemoteAddr(),
 		To:     dest,
 		Status: log.AccessAccepted,
 		Reason: "",
+		Email:  request.User.Email,
 	})
 	newError("tunnelling request to ", dest).WriteToLog(session.ExportIDToError(ctx))
 
@@ -231,8 +224,8 @@ func (s *Server) handleConnection(ctx context.Context, conn internet.Connection,
 
 	var requestDoneAndCloseWriter = task.OnSuccess(requestDone, task.Close(link.Writer))
 	if err := task.Run(ctx, requestDoneAndCloseWriter, responseDone); err != nil {
-		pipe.CloseError(link.Reader)
-		pipe.CloseError(link.Writer)
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
 		return newError("connection ends").Base(err)
 	}
 
